@@ -25,7 +25,7 @@ extern crate serde_json;
 // ------------------------------------------
 // hyperledger crates
 // ------------------------------------------
-extern crate indy;                      // rust wrapper project
+extern crate indyrs as indy; // rust wrapper project
 
 use std::env;
 use std::fs;
@@ -34,10 +34,12 @@ use std::path::PathBuf;
 
 use serde_json::Value;
 
-use indy::did::Did;
-use indy::ledger::Ledger;
-use indy::pool::Pool;
-use indy::wallet::Wallet;
+
+use indy::did;
+use indy::ledger;
+use indy::pool;
+use indy::wallet;
+use indy::future::Future;
 
 const PROTOCOL_VERSION: usize = 2;
 static USEFUL_CREDENTIALS: &'static str = r#"{"key": "12345678901234567890123456789012"}"#;
@@ -46,11 +48,85 @@ fn main() {
     let wallet_name = "wallet";
     let pool_name = "pool";
 
-    // Step 2 code goes here.
+    // PART 1
+    pool::set_protocol_version(PROTOCOL_VERSION).unwrap();
 
-    // Step 3 code goes here.
+    println!("1. Creating a new local pool ledger configuration that can be used later to connect pool nodes");
+    let pool_config_file = create_genesis_txn_file_for_pool(pool_name);
+    let pool_config = json!({
+        "genesis_txn" : &pool_config_file
+    });
+    pool::create_pool_ledger_config(&pool_name, Some(&pool_config.to_string())).unwrap();
 
-    // Step 4 code goes here.
+    println!("2. Open pool ledger and get the pool handle from libindy");
+    let pool_handle: i32 = pool::open_pool_ledger(&pool_name, None).unwrap();
+
+    println!("3. Creates a new wallet");
+    let config = json!({ "id" : wallet_name.to_string() }).to_string();
+    wallet::create(&config, USEFUL_CREDENTIALS).unwrap();
+
+    println!("4. Open wallet and get the wallet handle from libindy");
+    let wallet_handle: i32 = wallet::open(&config, USEFUL_CREDENTIALS).unwrap();
+
+    println!("5. Generating and storing steward DID and Verkey");
+    let first_json_seed = json!({
+        "seed":"000000000000000000000000Steward1"
+    }).to_string();
+    let (steward_did, _steward_verkey) = did::new(wallet_handle, &first_json_seed).unwrap();
+
+    println!("6. Generating and storing Trust Anchor DID and Verkey");
+    let (trustee_did, trustee_verkey) = did::new(wallet_handle, &"{}".to_string()).unwrap();
+
+    // 7. Build NYM request to add Trust Anchor to the ledger
+    println!("7. Build NYM request to add Trust Anchor to the ledger");
+    let build_nym_request: String = ledger::build_nym_request(&steward_did, &trustee_did, Some(&trustee_verkey), None, Some("TRUST_ANCHOR")).unwrap();
+
+    // 8. Sending the nym request to ledger
+    println!("8. Sending NYM request to ledger");
+    let _build_nym_sign_submit_result: String = ledger::sign_and_submit_request(pool_handle, wallet_handle, &steward_did, &build_nym_request).unwrap();
+
+    // PART 2
+    println!("9. Generating new Verkey of Trust Anchor in the wallet");
+    let trustee_temp_verkey = did::replace_keys_start(wallet_handle, &trustee_did, &"{}").unwrap();
+
+    println!("10. Building NYM request to update new verkey to ledger");
+    let replace_key_nym_request: String = ledger::build_nym_request(&trustee_did, &trustee_did, Some(&trustee_temp_verkey), None, Some("TRUST_ANCHOR")).unwrap();
+
+    println!("11. Sending NYM request to the ledger");
+    let _replace_key_nym_sign_submit_result: String = ledger::sign_and_submit_request(pool_handle, wallet_handle, &trustee_did, &replace_key_nym_request).unwrap();
+
+    println!("12. Applying new Trust Anchor's Verkey in wallet");
+    did::replace_keys_apply(wallet_handle, &trustee_did).unwrap();
+
+    // PART 3
+    println!("13. Reading new Verkey from wallet");
+    let trustee_verkey_from_wallet = did::get_ver_key_local(wallet_handle, &trustee_did).unwrap();
+
+    println!("14. Building GET_NYM request to get Trust Anchor from Verkey");
+    let refresh_build_nym_request: String = ledger::build_get_nym_request(None, &trustee_did).unwrap();
+
+    println!("15. Sending GET_NYM request to ledger");
+    let refresh_build_nym_response: String = ledger::submit_request(pool_handle, &refresh_build_nym_request).unwrap();
+
+    println!("16. Comparing Trust Anchor verkeys");
+    let refresh_json: Value = serde_json::from_str(&refresh_build_nym_response).unwrap();
+    let refresh_data: Value = serde_json::from_str(refresh_json["result"]["data"].as_str().unwrap()).unwrap();
+    let trustee_verkey_from_ledger = refresh_data["verkey"].as_str().unwrap();
+    println!("    Written by Steward: {}", &trustee_verkey);
+    println!("    Current from wallet: {}", &trustee_verkey_from_wallet);
+    println!("    Current from ledger: {}", &trustee_verkey_from_ledger);
+    assert_ne!(trustee_verkey, trustee_verkey_from_ledger, "Verkey's are matched");
+    assert_eq!(trustee_verkey_from_wallet, trustee_verkey_from_ledger, "Verkey's did not match as expected");
+
+    // CLEAN UP
+    println!("17. Close and delete wallet");
+    wallet::close(wallet_handle).unwrap();
+    wallet::delete(&config, USEFUL_CREDENTIALS).unwrap();
+
+    // Close pool
+    println!("    Close pool and delete pool ledger config");
+    pool::close(pool_handle).unwrap();
+    pool::delete(&pool_name).unwrap();
 }
 
 fn create_genesis_txn_file_for_pool(pool_name: &str) -> String {
