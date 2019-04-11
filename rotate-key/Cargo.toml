@@ -6,7 +6,7 @@ edition = "2018"
 
 [[bin]]
 name = "rotate-key"
-path = "src/rotate-key.rs"
+path = "src/main.rs"
 
 [dependencies]
 indy = "1.6.7"
