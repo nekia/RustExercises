@@ -1,18 +1,15 @@
 /*
-Example demonstrating how to do the key rotation on the ledger.
+This sample is extensions of "save-schema-and-cred-def"
 
-Steward already exists on the ledger and its DID/Verkey are obtained using seed.
-Trust Anchor's DID/Verkey pair is generated and stored into wallet.
-Stewards builds NYM request in order to add Trust Anchor to the ledger.
-Once NYM transaction is done, Trust Anchor wants to change its Verkey.
-First, temporary key is created in the wallet.
-Second, Trust Anchor builds NYM request to replace the Verkey on the ledger.
-Third, when NYM transaction succeeds, Trust Anchor makes new Verkey permanent in wallet
-(it was only temporary before).
+Shows how to issue a credential as a Trust Anchor which has created a Cred Definition
+for an existing Schema.
 
-To assert the changes, Trust Anchor reads both the Verkey from the wallet and the Verkey from the ledger
-using GET_NYM request, to make sure they are equal to the new Verkey, not the original one
-added by Steward
+After Trust Anchor has successfully created and stored a Cred Definition using Anonymous Credentials,
+Prover's wallet is created and opened, and used to generate Prover's Master Secret.
+After that, Trust Anchor generates Credential Offer for given Cred Definition, using Prover's DID
+Prover uses Credential Offer to create Credential Request
+Trust Anchor then uses Prover's Credential Request to issue a Credential.
+Finally, Prover stores Credential in its wallet.
 */
 
 // ------------------------------------------
@@ -32,8 +29,7 @@ use std::fs;
 use std::io::Write;
 use std::path::PathBuf;
 
-use serde_json::Value;
-
+use indy::anoncreds;
 use indy::did;
 use indy::ledger;
 use indy::pool;
@@ -44,8 +40,8 @@ const PROTOCOL_VERSION: usize = 2;
 static USEFUL_CREDENTIALS: &'static str = r#"{"key": "12345678901234567890123456789012"}"#;
 
 fn main() {
-    let wallet_name = "wallet4";
-    let pool_name = "pool4";
+    let wallet_name = "wallet20";
+    let pool_name = "pool20";
 
     // Step 2 code goes here.
     pool::set_protocol_version(PROTOCOL_VERSION).wait().unwrap();
@@ -85,53 +81,74 @@ fn main() {
     let _build_nym_sign_submit_result: String = ledger::sign_and_submit_request(pool_handle, wallet_handle, &steward_did, &build_nym_request).wait().unwrap();
 
 
+    println!("9. Create Schema and Build the SCHEMA request to add new schema to the ledger as a Steward");
+    let name = "gvt";
+    let version = "1.0";
+    let attributes = r#"["age", "sex", "height", "name"]"#;
+    let (_schema_id, schema_json) = anoncreds::issuer_create_schema(&steward_did, name, version, attributes).wait().unwrap();
+
+    let build_schema_request: String = ledger::build_schema_request(&steward_did, &schema_json).wait().unwrap();
+
+    println!("10. Sending the SCHEMA request to the ledger");
+    let _signed_schema_request_response = ledger::sign_and_submit_request(pool_handle, wallet_handle, &steward_did, &build_schema_request).wait().unwrap();
+
+    println!("11. Creating and storing CREDENTAIL DEFINITION using anoncreds as Trust Anchor, for the given Schema");
+    let config_json = r#"{ "support_revocation": false }"#;
+    let tag = r#"TAG1"#;
+
+    let (cred_def_id, cred_def_json) = anoncreds::issuer_create_and_store_credential_def(wallet_handle, &trustee_did, &schema_json, tag, None, config_json).wait().unwrap();
 
 
-    // PART 2
-    println!("9. Generating new Verkey of Trust Anchor in the wallet");
-    let trustee_temp_verkey = did::replace_keys_start(wallet_handle, &trustee_did, &"{}").wait().unwrap();
+    // Step 3 code goes here.
+    println!("12. Creating Prover wallet and opening it to get the handle");
+    let prover_did = "VsKV7grR1BUE29mG2Fm2kX";
+    let prover_wallet_name = "prover_wallet";
+    let prover_wallet_config = json!({ "id" : prover_wallet_name.to_string() }).to_string();
+    wallet::create_wallet(&prover_wallet_config, USEFUL_CREDENTIALS).wait().unwrap();
+    let prover_wallet_handle: i32 = wallet::open_wallet(&prover_wallet_config, USEFUL_CREDENTIALS).wait().unwrap();
 
-    println!("10. Building NYM request to update new verkey to ledger");
-    let replace_key_nym_request: String = ledger::build_nym_request(&trustee_did, &trustee_did, Some(&trustee_temp_verkey), None, Some("TRUST_ANCHOR")).wait().unwrap();
-
-    println!("11. Sending NYM request to the ledger");
-    let _replace_key_nym_sign_submit_result: String = ledger::sign_and_submit_request(pool_handle, wallet_handle, &trustee_did, &replace_key_nym_request).wait().unwrap();
-
-    println!("12. Applying new Trust Anchor's Verkey in wallet");
-    did::replace_keys_apply(wallet_handle, &trustee_did).wait().unwrap();
-
-
+    println!("13. Prover is creating Master Secret");
+    let master_secret_name = "master_secret";
+    anoncreds::prover_create_master_secret(prover_wallet_handle, Some(master_secret_name)).wait().unwrap();
 
 
     // Step 4 code goes here.
-    println!("13. Reading new Verkey from wallet");
-    let trustee_verkey_from_wallet = did::key_for_local_did(wallet_handle, &trustee_did).wait().unwrap();
+    println!("14. Issuer (Trust Anchor) is creating a Credential Offer for Prover");
+    let cred_offer_json = anoncreds::issuer_create_credential_offer(wallet_handle, &cred_def_id).wait().unwrap();
 
-    println!("14. Building GET_NYM request to get Trust Anchor from Verkey");
-    let refresh_build_nym_request: String = ledger::build_get_nym_request(None, &trustee_did).wait().unwrap();
+    println!("15. Prover creates Credential Request");
+    let (cred_req_json, cred_req_metadata_json) = anoncreds::prover_create_credential_req(prover_wallet_handle, prover_did, &cred_offer_json, &cred_def_json, &master_secret_name).wait().unwrap();
 
-    println!("15. Sending GET_NYM request to ledger");
-    let refresh_build_nym_response: String = ledger::submit_request(pool_handle, &refresh_build_nym_request).wait().unwrap();
+    println!("16. Issuer (Trust Anchor) creates Credential for Credential Request");
 
-    println!("16. Comparing Trust Anchor verkeys");
-    let refresh_json: Value = serde_json::from_str(&refresh_build_nym_response).unwrap();
-    let refresh_data: Value = serde_json::from_str(refresh_json["result"]["data"].as_str().unwrap()).unwrap();
-    let trustee_verkey_from_ledger = refresh_data["verkey"].as_str().unwrap();
-    println!("    Written by Steward: {}", &trustee_verkey);
-    println!("    Current from wallet: {}", &trustee_verkey_from_wallet);
-    println!("    Current from ledger: {}", &trustee_verkey_from_ledger);
-    assert_ne!(trustee_verkey, trustee_verkey_from_ledger, "Verkey's are matched");
-    assert_eq!(trustee_verkey_from_wallet, trustee_verkey_from_ledger, "Verkey's did not match as expected");
+    let cred_values_json = json!({
+            "sex": { "raw": "male", "encoded": "5944657099558967239210949258394887428692050081607692519917050011144233115103" },
+            "name": { "raw": "Alex", "encoded": "99262857098057710338306967609588410025648622308394250666849665532448612202874" },
+            "height": { "raw": "175", "encoded": "175" },
+            "age": { "raw": "28", "encoded": "28" },
+        });
+
+    println!("cred_values_json = '{}'", &cred_values_json.to_string());
+
+    let (cred_json, _cred_revoc_id, _revoc_reg_delta_json) =
+    anoncreds::issuer_create_credential(wallet_handle, &cred_offer_json, &cred_req_json, &cred_values_json.to_string(), None, -1).wait().unwrap();
+
+    println!("17. Prover processes and stores Credential");
+    let out_cred_id = anoncreds::prover_store_credential(prover_wallet_handle, None, &cred_req_metadata_json, &cred_json, &cred_def_json, None).wait().unwrap();
+
+    println!("Stored Credential ID is {}", &out_cred_id);
 
     // CLEAN UP
-    println!("17. Close and delete wallet");
+    println!("12. Close and delete wallet");
+    wallet::close_wallet(prover_wallet_handle).wait().unwrap();
+    wallet::delete_wallet(&prover_wallet_config, USEFUL_CREDENTIALS).wait().unwrap();
     wallet::close_wallet(wallet_handle).wait().unwrap();
     wallet::delete_wallet(&config, USEFUL_CREDENTIALS).wait().unwrap();
 
-    // Close pool
-    println!("    Close pool and delete pool ledger config");
+    println!("13. Close pool and delete pool ledger config");
     pool::close_pool_ledger(pool_handle).wait().unwrap();
     pool::delete_pool_ledger(&pool_name).wait().unwrap();
+
 }
 
 fn create_genesis_txn_file_for_pool(pool_name: &str) -> String {

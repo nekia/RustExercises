@@ -1,12 +1,8 @@
 [package]
-name = "rotate-key"
+name = "issue_credential"
 version = "0.1.0"
 authors = ["Atsushi Neki <atsushin@fast.au.fujitsu.com>"]
 edition = "2018"
-
-[[bin]]
-name = "save-schema-and-cred-def"
-path = "src/main.rs"
 
 [dependencies]
 indy = "1.6.7"
